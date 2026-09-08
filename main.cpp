@@ -278,4 +278,52 @@ EXPORT void* samplog_clump_F(const char* path) {
     return clump;
 }
 
+
+typedef void* (*GetHierFromClumpFn)(void*);
+typedef void  (*SetFrameHierFn)(void*, void*);
+typedef void  (*UpdateMatricesFn)(void*);
+
+EXPORT bool samplog_swap_clump_safe(void* pedPtr, void* newClump) {
+    FILE* log = fopen(TESTLOG, "a");
+    if (log) fprintf(log, "\n=== SWAP SAFE ===\n");
+
+    void* hGtasa = dlopen("libGTASA.so", RTLD_NOW);
+    if (!hGtasa) { if (log) { fprintf(log, "dlopen gagal\n"); fclose(log); } return false; }
+
+    static GetHierFromClumpFn GetAnimHierarchyFromClump =
+        (GetHierFromClumpFn)dlsym(hGtasa, "_Z25GetAnimHierarchyFromClumpP7RpClump");
+    static SetFrameHierFn RpHAnimFrameSetHierarchy =
+        (SetFrameHierFn)dlsym(hGtasa, "_Z24RpHAnimFrameSetHierarchyP7RwFrameP16RpHAnimHierarchy");
+    static UpdateMatricesFn RpHAnimHierarchyUpdateMatrices =
+        (UpdateMatricesFn)dlsym(hGtasa, "_Z30RpHAnimHierarchyUpdateMatricesP16RpHAnimHierarchy");
+
+    if (log) fprintf(log, "syms: %p %p %p\n",
+        (void*)GetAnimHierarchyFromClump, (void*)RpHAnimFrameSetHierarchy, (void*)RpHAnimHierarchyUpdateMatrices);
+
+    if (!GetAnimHierarchyFromClump || !RpHAnimFrameSetHierarchy) {
+        if (log) fclose(log); return false;
+    }
+
+    void** clumpSlot = (void**)((unsigned char*)pedPtr + 0x18);
+    void* oldClump = *clumpSlot;
+    if (log) fprintf(log, "oldClump=%p newClump=%p\n", oldClump, newClump);
+    if (!oldClump || !newClump) { if (log) fclose(log); return false; }
+
+    void* hier = GetAnimHierarchyFromClump(oldClump);
+    if (log) fprintf(log, "hier=%p\n", hier);
+    if (!hier) { if (log) fclose(log); return false; }
+
+    // RwObject layout: byte type,subType,flags,privateFlags lalu void* parent (frame) di offset 0x4
+    void* newFrame = *(void**)((unsigned char*)newClump + 0x4);
+    if (log) fprintf(log, "newFrame=%p\n", newFrame);
+    if (!newFrame) { if (log) fclose(log); return false; }
+
+    RpHAnimFrameSetHierarchy(newFrame, hier);
+    if (RpHAnimHierarchyUpdateMatrices) RpHAnimHierarchyUpdateMatrices(hier);
+
+    *clumpSlot = newClump;
+    if (log) { fprintf(log, "SWAP OK\n"); fclose(log); }
+    return true;
+}
+
 } // extern "C"
