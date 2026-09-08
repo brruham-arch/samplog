@@ -326,4 +326,38 @@ EXPORT bool samplog_swap_clump_safe(void* pedPtr, void* newClump) {
     return true;
 }
 
+
+#include "dobby.h"
+
+typedef void (*PlayFootStepsFn)(void*);
+static PlayFootStepsFn orig_PlayFootSteps = nullptr;
+typedef void* (*GetFirstAssocFn)(void*);
+static GetFirstAssocFn g_GetFirstAssoc = nullptr;
+
+static void hook_PlayFootSteps(void* thisPed) {
+    if (g_GetFirstAssoc) {
+        void* clump = *(void**)((unsigned char*)thisPed + 0x18);
+        if (clump) {
+            void* assoc = g_GetFirstAssoc(clump);
+            if (!assoc) return; // skip, hindari crash null deref
+        }
+    }
+    orig_PlayFootSteps(thisPed);
+}
+
+EXPORT bool samplog_hook_footsteps() {
+    FILE* log = fopen(TESTLOG, "a");
+    void* hGtasa = dlopen("libGTASA.so", RTLD_NOW);
+    if (!hGtasa) { if (log) { fprintf(log, "hook: dlopen gagal\n"); fclose(log); } return false; }
+
+    void* target = dlsym(hGtasa, "_ZN4CPed13PlayFootStepsEv");
+    g_GetFirstAssoc = (GetFirstAssocFn)dlsym(hGtasa, "_Z35RpAnimBlendClumpGetFirstAssociationP7RpClump");
+    if (log) fprintf(log, "hook: target=%p getFirstAssoc=%p\n", target, (void*)g_GetFirstAssoc);
+    if (!target) { if (log) fclose(log); return false; }
+
+    DobbyHook(target, (void*)hook_PlayFootSteps, (void**)&orig_PlayFootSteps);
+    if (log) { fprintf(log, "hook: terpasang\n"); fclose(log); }
+    return true;
+}
+
 } // extern "C"
