@@ -145,6 +145,15 @@ EXPORT void* samplog_load_clump_from_file(const char* path) {
     fclose(f);
     LOGT("[loadclump] fread=%zu\n", rd);
 
+    {
+        unsigned char* b = (unsigned char*)buf;
+        LOGT("[loadclump] header bytes: %02X %02X %02X %02X  %02X %02X %02X %02X  %02X %02X %02X %02X\n",
+             b[0],b[1],b[2],b[3], b[4],b[5],b[6],b[7], b[8],b[9],b[10],b[11]);
+        uint32_t chunkId = b[0] | (b[1]<<8) | (b[2]<<16) | (b[3]<<24);
+        uint32_t chunkSize = b[4] | (b[5]<<8) | (b[6]<<16) | (b[7]<<24);
+        LOGT("[loadclump] chunkId=0x%X chunkSize=%u (fileSize-12=%ld)\n", chunkId, chunkSize, size-12);
+    }
+
     static RwStreamOpenFn RwStreamOpen = nullptr;
     static RpClumpGtaStreamReadFn RpClumpGtaStreamRead = nullptr;
     if (!RwStreamOpen) {
