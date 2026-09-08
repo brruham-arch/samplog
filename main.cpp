@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -17,7 +18,6 @@ static void findModule(uintptr_t addr, char* outName, size_t outLen, uintptr_t* 
     FILE* f = fopen("/proc/self/maps", "r");
     outName[0] = 0; *outBase = 0;
     if (!f) return;
-
     char line[512], matched[256] = {0};
     while (fgets(line, sizeof(line), f)) {
         uintptr_t start, end; char path[256] = {0};
@@ -30,7 +30,6 @@ static void findModule(uintptr_t addr, char* outName, size_t outLen, uintptr_t* 
     }
     if (!matched[0]) { fclose(f); return; }
     strncpy(outName, matched, outLen-1);
-
     rewind(f);
     uintptr_t minStart = (uintptr_t)-1;
     while (fgets(line, sizeof(line), f)) {
@@ -57,7 +56,6 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontextRaw) {
 #endif
     char mod[256]; uintptr_t base = 0;
     findModule(pc, mod, sizeof(mod), &base);
-
     char modLr[256]; uintptr_t baseLr = 0;
     findModule(lr, modLr, sizeof(modLr), &baseLr);
 
@@ -73,7 +71,6 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontextRaw) {
                 (unsigned long)r0, (unsigned long)r1, (unsigned long)r2, (unsigned long)r3);
         fclose(f);
     }
-
     int idx = (sig==SIGSEGV)?0:(sig==SIGABRT)?1:(sig==SIGBUS)?2:3;
     sigaction(sig, &g_old[idx], nullptr);
     raise(sig);
@@ -86,10 +83,44 @@ static void install(int sig, int idx) {
     sigaction(sig, &sa, &g_old[idx]);
 }
 
+typedef void* (*RwStreamOpenFn)(int, int, void*);
+typedef void* (*RpClumpGtaStreamReadFn)(void*);
+
+struct ParamsBufFirst  { void* buffer; uint32_t length; };
+struct ParamsLenFirst  { uint32_t length; void* buffer; };
+
+static RwStreamOpenFn g_RwStreamOpen = nullptr;
+static RpClumpGtaStreamReadFn g_RpClumpGtaStreamRead = nullptr;
+
+static bool ensureSyms(FILE* log) {
+    if (g_RwStreamOpen && g_RpClumpGtaStreamRead) return true;
+    void* hGtasa = dlopen("libGTASA.so", RTLD_NOW);
+    if (log) fprintf(log, "dlopen libGTASA.so handle=%p\n", hGtasa);
+    if (!hGtasa) return false;
+    g_RwStreamOpen = (RwStreamOpenFn)dlsym(hGtasa, "_Z12RwStreamOpen12RwStreamType18RwStreamAccessTypePKv");
+    g_RpClumpGtaStreamRead = (RpClumpGtaStreamReadFn)dlsym(hGtasa, "_Z20RpClumpGtaStreamReadP8RwStream");
+    if (log) fprintf(log, "RwStreamOpen=%p RpClumpGtaStreamRead=%p\n", (void*)g_RwStreamOpen, (void*)g_RpClumpGtaStreamRead);
+    return g_RwStreamOpen && g_RpClumpGtaStreamRead;
+}
+
+static unsigned char* readWholeFile(const char* path, long* outSize, FILE* log) {
+    FILE* f = fopen(path, "rb");
+    if (!f) { if (log) fprintf(log, "fopen gagal errno=%d (%s)\n", errno, strerror(errno)); return nullptr; }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    unsigned char* buf = (unsigned char*)malloc(size);
+    size_t rd = fread(buf, 1, size, f);
+    fclose(f);
+    if (log) fprintf(log, "fopen sukses size=%ld fread=%zu\n", size, rd);
+    *outSize = size;
+    return buf;
+}
+
 extern "C" {
 
 EXPORT void* __GetModInfo() {
-    static const char* info = "samplog|1.3|crash logger + memory-stream clump loader|brruham";
+    static const char* info = "samplog|2.0|multi-variant clump loader|brruham";
     return (void*)info;
 }
 
@@ -99,95 +130,150 @@ EXPORT void OnModLoad() {
     install(SIGSEGV, 0); install(SIGABRT, 1);
     install(SIGBUS, 2);  install(SIGILL, 3);
     FILE* f = fopen(LOGFILE, "a");
-    if (f) { fprintf(f, "[samplog] handler terpasang v1.3\n"); fclose(f); }
+    if (f) { fprintf(f, "[samplog] handler terpasang v2.0\n"); fclose(f); }
 }
 
 EXPORT int samplog_test_fopen(const char* path) {
-    FILE* f = fopen(path, "rb");
+    long size = 0;
     FILE* log = fopen(TESTLOG, "a");
-    if (!f) {
-        if (log) { fprintf(log, "[testfopen] path=%s GAGAL fopen\n", path); fclose(log); }
-        return -1;
-    }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fclose(f);
-    if (log) { fprintf(log, "[testfopen] path=%s SUKSES, size=%ld bytes\n", path, size); fclose(log); }
+    if (log) fprintf(log, "[test_fopen] path=%s\n", path);
+    unsigned char* buf = readWholeFile(path, &size, log);
+    if (log) fclose(log);
+    if (!buf) return -1;
+    free(buf);
     return (int)size;
 }
 
-typedef void* (*RwStreamOpenFn)(int, int, void*);
-typedef void* (*RpClumpGtaStreamReadFn)(void*);
-
-struct RwMemStreamParams {
-    void* buffer;
-    uint32_t length;
-};
-
-EXPORT void* samplog_load_clump_from_file(const char* path) {
+// Variant A: type=3, full buffer (termasuk 12-byte header), struct {buffer,length}
+EXPORT void* samplog_clump_A(const char* path) {
     FILE* log = fopen(TESTLOG, "a");
-    #define LOGT(...) do { if (log) { fprintf(log, __VA_ARGS__); fflush(log); } } while(0)
+    if (log) fprintf(log, "\n=== VARIANT A: type=3 full-buffer {buffer,length} ===\n");
+    long size = 0;
+    unsigned char* buf = readWholeFile(path, &size, log);
+    if (!buf || !ensureSyms(log)) { if (log) fclose(log); return nullptr; }
 
-    LOGT("[loadclump] mulai path=%s\n", path);
-
-    FILE* f = fopen(path, "rb");
-    if (!f) { LOGT("[loadclump] fopen gagal\n"); if (log) fclose(log); return nullptr; }
-
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    LOGT("[loadclump] size=%ld\n", size);
-
-    void* buf = malloc(size);
-    if (!buf) { LOGT("[loadclump] malloc gagal\n"); fclose(f); if (log) fclose(log); return nullptr; }
-
-    size_t rd = fread(buf, 1, size, f);
-    fclose(f);
-    LOGT("[loadclump] fread=%zu\n", rd);
-
-    {
-        unsigned char* b = (unsigned char*)buf;
-        LOGT("[loadclump] header bytes: %02X %02X %02X %02X  %02X %02X %02X %02X  %02X %02X %02X %02X\n",
-             b[0],b[1],b[2],b[3], b[4],b[5],b[6],b[7], b[8],b[9],b[10],b[11]);
-        uint32_t chunkId = b[0] | (b[1]<<8) | (b[2]<<16) | (b[3]<<24);
-        uint32_t chunkSize = b[4] | (b[5]<<8) | (b[6]<<16) | (b[7]<<24);
-        LOGT("[loadclump] chunkId=0x%X chunkSize=%u (fileSize-12=%ld)\n", chunkId, chunkSize, size-12);
-    }
-
-    static RwStreamOpenFn RwStreamOpen = nullptr;
-    static RpClumpGtaStreamReadFn RpClumpGtaStreamRead = nullptr;
-    if (!RwStreamOpen) {
-        void* hGtasa = dlopen("libGTASA.so", RTLD_NOW);
-        LOGT("[loadclump] dlopen libGTASA.so handle=%p\n", hGtasa);
-        if (hGtasa) {
-            RwStreamOpen = (RwStreamOpenFn)dlsym(hGtasa, "_Z12RwStreamOpen12RwStreamType18RwStreamAccessTypePKv");
-            RpClumpGtaStreamRead = (RpClumpGtaStreamReadFn)dlsym(hGtasa, "_Z20RpClumpGtaStreamReadP8RwStream");
-        }
-    }
-    LOGT("[loadclump] RwStreamOpen=%p RpClumpGtaStreamRead=%p\n", (void*)RwStreamOpen, (void*)RpClumpGtaStreamRead);
-
-    if (!RwStreamOpen || !RpClumpGtaStreamRead) {
-        LOGT("[loadclump] dlsym gagal\n");
-        free(buf); if (log) fclose(log); return nullptr;
-    }
-
-    RwMemStreamParams params;
+    ParamsBufFirst params;
     params.buffer = buf;
     params.length = (uint32_t)size;
-
-    LOGT("[loadclump] sebelum RwStreamOpen (type=3 memory)\n");
-    void* stream = RwStreamOpen(3, 1, &params);
-    LOGT("[loadclump] sesudah RwStreamOpen stream=%p\n", stream);
-
-    if (!stream) {
-        LOGT("[loadclump] stream NULL\n");
-        free(buf); if (log) fclose(log); return nullptr;
+    void* stream = g_RwStreamOpen(3, 1, &params);
+    if (log) fprintf(log, "A: stream=%p\n", stream);
+    void* clump = nullptr;
+    if (stream) {
+        clump = g_RpClumpGtaStreamRead(stream);
+        if (log) fprintf(log, "A: clump=%p\n", clump);
     }
+    if (log) fclose(log);
+    return clump;
+}
 
-    LOGT("[loadclump] sebelum RpClumpGtaStreamRead\n");
-    void* clump = RpClumpGtaStreamRead(stream);
-    LOGT("[loadclump] sesudah RpClumpGtaStreamRead clump=%p\n", clump);
+// Variant B: type=3, skip 12-byte header, struct {buffer,length}
+EXPORT void* samplog_clump_B(const char* path) {
+    FILE* log = fopen(TESTLOG, "a");
+    if (log) fprintf(log, "\n=== VARIANT B: type=3 skip-header {buffer,length} ===\n");
+    long size = 0;
+    unsigned char* buf = readWholeFile(path, &size, log);
+    if (!buf || !ensureSyms(log)) { if (log) fclose(log); return nullptr; }
+    if (size <= 12) { if (log) { fprintf(log, "B: file kekecilan\n"); fclose(log); } return nullptr; }
 
+    ParamsBufFirst params;
+    params.buffer = buf + 12;
+    params.length = (uint32_t)(size - 12);
+    void* stream = g_RwStreamOpen(3, 1, &params);
+    if (log) fprintf(log, "B: stream=%p\n", stream);
+    void* clump = nullptr;
+    if (stream) {
+        clump = g_RpClumpGtaStreamRead(stream);
+        if (log) fprintf(log, "B: clump=%p\n", clump);
+    }
+    if (log) fclose(log);
+    return clump;
+}
+
+// Variant C: type=4, full buffer, struct {buffer,length}  (jaga-jaga kalau enum type beda)
+EXPORT void* samplog_clump_C(const char* path) {
+    FILE* log = fopen(TESTLOG, "a");
+    if (log) fprintf(log, "\n=== VARIANT C: type=4 full-buffer {buffer,length} ===\n");
+    long size = 0;
+    unsigned char* buf = readWholeFile(path, &size, log);
+    if (!buf || !ensureSyms(log)) { if (log) fclose(log); return nullptr; }
+
+    ParamsBufFirst params;
+    params.buffer = buf;
+    params.length = (uint32_t)size;
+    void* stream = g_RwStreamOpen(4, 1, &params);
+    if (log) fprintf(log, "C: stream=%p\n", stream);
+    void* clump = nullptr;
+    if (stream) {
+        clump = g_RpClumpGtaStreamRead(stream);
+        if (log) fprintf(log, "C: clump=%p\n", clump);
+    }
+    if (log) fclose(log);
+    return clump;
+}
+
+// Variant D: type=3, full buffer, struct DIBALIK {length,buffer}
+EXPORT void* samplog_clump_D(const char* path) {
+    FILE* log = fopen(TESTLOG, "a");
+    if (log) fprintf(log, "\n=== VARIANT D: type=3 full-buffer {length,buffer} DIBALIK ===\n");
+    long size = 0;
+    unsigned char* buf = readWholeFile(path, &size, log);
+    if (!buf || !ensureSyms(log)) { if (log) fclose(log); return nullptr; }
+
+    ParamsLenFirst params;
+    params.length = (uint32_t)size;
+    params.buffer = buf;
+    void* stream = g_RwStreamOpen(3, 1, &params);
+    if (log) fprintf(log, "D: stream=%p\n", stream);
+    void* clump = nullptr;
+    if (stream) {
+        clump = g_RpClumpGtaStreamRead(stream);
+        if (log) fprintf(log, "D: clump=%p\n", clump);
+    }
+    if (log) fclose(log);
+    return clump;
+}
+
+// Variant E: type=3, skip header, struct DIBALIK {length,buffer}
+EXPORT void* samplog_clump_E(const char* path) {
+    FILE* log = fopen(TESTLOG, "a");
+    if (log) fprintf(log, "\n=== VARIANT E: type=3 skip-header {length,buffer} DIBALIK ===\n");
+    long size = 0;
+    unsigned char* buf = readWholeFile(path, &size, log);
+    if (!buf || !ensureSyms(log)) { if (log) fclose(log); return nullptr; }
+    if (size <= 12) { if (log) { fprintf(log, "E: file kekecilan\n"); fclose(log); } return nullptr; }
+
+    ParamsLenFirst params;
+    params.length = (uint32_t)(size - 12);
+    params.buffer = buf + 12;
+    void* stream = g_RwStreamOpen(3, 1, &params);
+    if (log) fprintf(log, "E: stream=%p\n", stream);
+    void* clump = nullptr;
+    if (stream) {
+        clump = g_RpClumpGtaStreamRead(stream);
+        if (log) fprintf(log, "E: clump=%p\n", clump);
+    }
+    if (log) fclose(log);
+    return clump;
+}
+
+// Variant F: type=5, full buffer, struct {buffer,length}
+EXPORT void* samplog_clump_F(const char* path) {
+    FILE* log = fopen(TESTLOG, "a");
+    if (log) fprintf(log, "\n=== VARIANT F: type=5 full-buffer {buffer,length} ===\n");
+    long size = 0;
+    unsigned char* buf = readWholeFile(path, &size, log);
+    if (!buf || !ensureSyms(log)) { if (log) fclose(log); return nullptr; }
+
+    ParamsBufFirst params;
+    params.buffer = buf;
+    params.length = (uint32_t)size;
+    void* stream = g_RwStreamOpen(5, 1, &params);
+    if (log) fprintf(log, "F: stream=%p\n", stream);
+    void* clump = nullptr;
+    if (stream) {
+        clump = g_RpClumpGtaStreamRead(stream);
+        if (log) fprintf(log, "F: clump=%p\n", clump);
+    }
     if (log) fclose(log);
     return clump;
 }
