@@ -1,12 +1,14 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 #define LOGFILE "/storage/emulated/0/samplog_crash.txt"
+#define TESTLOG "/storage/emulated/0/samplog_test.txt"
 #define EXPORT __attribute__((visibility("default")))
 
 static struct sigaction g_old[4];
@@ -84,33 +86,97 @@ static void install(int sig, int idx) {
     sigaction(sig, &sa, &g_old[idx]);
 }
 
-static void testFopen(const char* path) {
-    FILE* f = fopen(path, "rb");
-    FILE* lf = fopen(LOGFILE, "a");
-    if (lf) {
-        if (f) {
-            fseek(f, 0, SEEK_END);
-            long sz = ftell(f);
-            fprintf(lf, "[testfopen] path=%s SUKSES, size=%ld bytes\n", path, sz);
-            fclose(f);
-        } else {
-            fprintf(lf, "[testfopen] path=%s GAGAL, errno=%d (%s)\n", path, errno, strerror(errno));
-        }
-        fclose(lf);
-    }
-}
-
 extern "C" {
+
 EXPORT void* __GetModInfo() {
-    static const char* info = "samplog|1.2|Crash logger + fopen tester|brruham";
+    static const char* info = "samplog|1.3|crash logger + memory-stream clump loader|brruham";
     return (void*)info;
 }
-EXPORT void OnModPreLoad() { remove(LOGFILE); }
+
+EXPORT void OnModPreLoad() { remove(LOGFILE); remove(TESTLOG); }
+
 EXPORT void OnModLoad() {
     install(SIGSEGV, 0); install(SIGABRT, 1);
     install(SIGBUS, 2);  install(SIGILL, 3);
     FILE* f = fopen(LOGFILE, "a");
-    if (f) { fprintf(f, "[samplog] handler terpasang v1.2\n"); fclose(f); }
+    if (f) { fprintf(f, "[samplog] handler terpasang v1.3\n"); fclose(f); }
 }
-EXPORT void samplog_test_fopen(const char* path) { testFopen(path); }
+
+EXPORT int samplog_test_fopen(const char* path) {
+    FILE* f = fopen(path, "rb");
+    FILE* log = fopen(TESTLOG, "a");
+    if (!f) {
+        if (log) { fprintf(log, "[testfopen] path=%s GAGAL fopen\n", path); fclose(log); }
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fclose(f);
+    if (log) { fprintf(log, "[testfopen] path=%s SUKSES, size=%ld bytes\n", path, size); fclose(log); }
+    return (int)size;
 }
+
+typedef void* (*RwStreamOpenFn)(int, int, void*);
+typedef void* (*RpClumpGtaStreamReadFn)(void*);
+
+struct RwMemStreamParams {
+    void* buffer;
+    uint32_t length;
+};
+
+EXPORT void* samplog_load_clump_from_file(const char* path) {
+    FILE* log = fopen(TESTLOG, "a");
+    #define LOGT(...) do { if (log) { fprintf(log, __VA_ARGS__); fflush(log); } } while(0)
+
+    LOGT("[loadclump] mulai path=%s\n", path);
+
+    FILE* f = fopen(path, "rb");
+    if (!f) { LOGT("[loadclump] fopen gagal\n"); if (log) fclose(log); return nullptr; }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    LOGT("[loadclump] size=%ld\n", size);
+
+    void* buf = malloc(size);
+    if (!buf) { LOGT("[loadclump] malloc gagal\n"); fclose(f); if (log) fclose(log); return nullptr; }
+
+    size_t rd = fread(buf, 1, size, f);
+    fclose(f);
+    LOGT("[loadclump] fread=%zu\n", rd);
+
+    static RwStreamOpenFn RwStreamOpen = nullptr;
+    static RpClumpGtaStreamReadFn RpClumpGtaStreamRead = nullptr;
+    if (!RwStreamOpen) {
+        RwStreamOpen = (RwStreamOpenFn)dlsym(RTLD_DEFAULT, "_Z12RwStreamOpen12RwStreamType18RwStreamAccessTypePKv");
+        RpClumpGtaStreamRead = (RpClumpGtaStreamReadFn)dlsym(RTLD_DEFAULT, "_Z20RpClumpGtaStreamReadP8RwStream");
+    }
+    LOGT("[loadclump] RwStreamOpen=%p RpClumpGtaStreamRead=%p\n", (void*)RwStreamOpen, (void*)RpClumpGtaStreamRead);
+
+    if (!RwStreamOpen || !RpClumpGtaStreamRead) {
+        LOGT("[loadclump] dlsym gagal\n");
+        free(buf); if (log) fclose(log); return nullptr;
+    }
+
+    RwMemStreamParams params;
+    params.buffer = buf;
+    params.length = (uint32_t)size;
+
+    LOGT("[loadclump] sebelum RwStreamOpen (type=3 memory)\n");
+    void* stream = RwStreamOpen(3, 1, &params);
+    LOGT("[loadclump] sesudah RwStreamOpen stream=%p\n", stream);
+
+    if (!stream) {
+        LOGT("[loadclump] stream NULL\n");
+        free(buf); if (log) fclose(log); return nullptr;
+    }
+
+    LOGT("[loadclump] sebelum RpClumpGtaStreamRead\n");
+    void* clump = RpClumpGtaStreamRead(stream);
+    LOGT("[loadclump] sesudah RpClumpGtaStreamRead clump=%p\n", clump);
+
+    if (log) fclose(log);
+    return clump;
+}
+
+} // extern "C"
