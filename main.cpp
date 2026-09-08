@@ -313,6 +313,25 @@ EXPORT bool samplog_swap_clump_safe(void* pedPtr, void* newClump) {
     if (log) fprintf(log, "hier=%p\n", hier);
     if (!hier) { if (log) fclose(log); return false; }
 
+    typedef void (*ClumpInitFn)(void*);
+    typedef void (*AddAnimFn)(void*, int, int);
+    static ClumpInitFn RpAnimBlendClumpInit =
+        (ClumpInitFn)dlsym(hGtasa, "_Z20RpAnimBlendClumpInitP7RpClump");
+    static AddAnimFn CAnimManager_AddAnimation =
+        (AddAnimFn)dlsym(hGtasa, "_ZN12CAnimManager12AddAnimationEP7RpClump12AssocGroupId11AnimationId");
+
+    if (log) fprintf(log, "clumpInit=%p addAnim=%p\n", (void*)RpAnimBlendClumpInit, (void*)CAnimManager_AddAnimation);
+
+    if (RpAnimBlendClumpInit) {
+        RpAnimBlendClumpInit(newClump);
+        if (log) fprintf(log, "RpAnimBlendClumpInit dipanggil\n");
+    }
+    if (CAnimManager_AddAnimation) {
+        CAnimManager_AddAnimation(newClump, 0, 3); // group 0, ANIM_STD_IDLE_STANCE (id umum=3)
+        void* checkAssoc = g_GetFirstAssoc ? g_GetFirstAssoc(newClump) : nullptr;
+        if (log) fprintf(log, "AddAnimation dipanggil, firstAssoc setelah init=%p\n", checkAssoc);
+    }
+
     // RwObject layout: byte type,subType,flags,privateFlags lalu void* parent (frame) di offset 0x4
     void* newFrame = *(void**)((unsigned char*)newClump + 0x4);
     if (log) fprintf(log, "newFrame=%p\n", newFrame);
@@ -327,37 +346,5 @@ EXPORT bool samplog_swap_clump_safe(void* pedPtr, void* newClump) {
 }
 
 
-#include "dobby.h"
-
-typedef void (*PlayFootStepsFn)(void*);
-static PlayFootStepsFn orig_PlayFootSteps = nullptr;
-typedef void* (*GetFirstAssocFn)(void*);
-static GetFirstAssocFn g_GetFirstAssoc = nullptr;
-
-static void hook_PlayFootSteps(void* thisPed) {
-    if (g_GetFirstAssoc) {
-        void* clump = *(void**)((unsigned char*)thisPed + 0x18);
-        if (clump) {
-            void* assoc = g_GetFirstAssoc(clump);
-            if (!assoc) return; // skip, hindari crash null deref
-        }
-    }
-    orig_PlayFootSteps(thisPed);
-}
-
-EXPORT bool samplog_hook_footsteps() {
-    FILE* log = fopen(TESTLOG, "a");
-    void* hGtasa = dlopen("libGTASA.so", RTLD_NOW);
-    if (!hGtasa) { if (log) { fprintf(log, "hook: dlopen gagal\n"); fclose(log); } return false; }
-
-    void* target = dlsym(hGtasa, "_ZN4CPed13PlayFootStepsEv");
-    g_GetFirstAssoc = (GetFirstAssocFn)dlsym(hGtasa, "_Z35RpAnimBlendClumpGetFirstAssociationP7RpClump");
-    if (log) fprintf(log, "hook: target=%p getFirstAssoc=%p\n", target, (void*)g_GetFirstAssoc);
-    if (!target) { if (log) fclose(log); return false; }
-
-    DobbyHook(target, (void*)hook_PlayFootSteps, (void**)&orig_PlayFootSteps);
-    if (log) { fprintf(log, "hook: terpasang\n"); fclose(log); }
-    return true;
-}
 
 } // extern "C"
