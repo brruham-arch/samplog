@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -83,9 +84,25 @@ static void install(int sig, int idx) {
     sigaction(sig, &sa, &g_old[idx]);
 }
 
+static void testFopen(const char* path) {
+    FILE* f = fopen(path, "rb");
+    FILE* lf = fopen(LOGFILE, "a");
+    if (lf) {
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fprintf(lf, "[testfopen] path=%s SUKSES, size=%ld bytes\n", path, sz);
+            fclose(f);
+        } else {
+            fprintf(lf, "[testfopen] path=%s GAGAL, errno=%d (%s)\n", path, errno, strerror(errno));
+        }
+        fclose(lf);
+    }
+}
+
 extern "C" {
 EXPORT void* __GetModInfo() {
-    static const char* info = "samplog|1.1|Native crash logger (module+offset+lr+regs)|brruham";
+    static const char* info = "samplog|1.2|Crash logger + fopen tester|brruham";
     return (void*)info;
 }
 EXPORT void OnModPreLoad() { remove(LOGFILE); }
@@ -93,6 +110,7 @@ EXPORT void OnModLoad() {
     install(SIGSEGV, 0); install(SIGABRT, 1);
     install(SIGBUS, 2);  install(SIGILL, 3);
     FILE* f = fopen(LOGFILE, "a");
-    if (f) { fprintf(f, "[samplog] handler terpasang v1.1\n"); fclose(f); }
+    if (f) { fprintf(f, "[samplog] handler terpasang v1.2\n"); fclose(f); }
 }
+EXPORT void samplog_test_fopen(const char* path) { testFopen(path); }
 }
