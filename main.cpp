@@ -148,8 +148,12 @@ EXPORT void* samplog_load_clump_from_file(const char* path) {
     static RwStreamOpenFn RwStreamOpen = nullptr;
     static RpClumpGtaStreamReadFn RpClumpGtaStreamRead = nullptr;
     if (!RwStreamOpen) {
-        RwStreamOpen = (RwStreamOpenFn)dlsym(RTLD_DEFAULT, "_Z12RwStreamOpen12RwStreamType18RwStreamAccessTypePKv");
-        RpClumpGtaStreamRead = (RpClumpGtaStreamReadFn)dlsym(RTLD_DEFAULT, "_Z20RpClumpGtaStreamReadP8RwStream");
+        void* hGtasa = dlopen("libGTASA.so", RTLD_NOW);
+        LOGT("[loadclump] dlopen libGTASA.so handle=%p\n", hGtasa);
+        if (hGtasa) {
+            RwStreamOpen = (RwStreamOpenFn)dlsym(hGtasa, "_Z12RwStreamOpen12RwStreamType18RwStreamAccessTypePKv");
+            RpClumpGtaStreamRead = (RpClumpGtaStreamReadFn)dlsym(hGtasa, "_Z20RpClumpGtaStreamReadP8RwStream");
+        }
     }
     LOGT("[loadclump] RwStreamOpen=%p RpClumpGtaStreamRead=%p\n", (void*)RwStreamOpen, (void*)RpClumpGtaStreamRead);
 
