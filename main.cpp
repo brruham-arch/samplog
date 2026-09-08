@@ -44,26 +44,36 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontextRaw) {
     ucontext_t* uc = (ucontext_t*)ucontextRaw;
 #if defined(__arm__)
     uintptr_t pc = uc->uc_mcontext.arm_pc;
-#elif defined(__aarch64__)
-    uintptr_t pc = uc->uc_mcontext.pc;
+    uintptr_t lr = uc->uc_mcontext.arm_lr;
+    uintptr_t r0 = uc->uc_mcontext.arm_r0;
+    uintptr_t r1 = uc->uc_mcontext.arm_r1;
+    uintptr_t r2 = uc->uc_mcontext.arm_r2;
+    uintptr_t r3 = uc->uc_mcontext.arm_r3;
 #else
-    uintptr_t pc = 0;
+    uintptr_t pc = 0, lr = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0;
 #endif
     char mod[256]; uintptr_t base = 0;
     findModule(pc, mod, sizeof(mod), &base);
 
+    char modLr[256]; uintptr_t baseLr = 0;
+    findModule(lr, modLr, sizeof(modLr), &baseLr);
+
     FILE* f = fopen(LOGFILE, "a");
     if (f) {
         fprintf(f, "==== CRASH ====\n");
-        fprintf(f, "signal: %d\nfault_addr: %p\npc: 0x%lx\n", sig, info->si_addr, (unsigned long)pc);
-        fprintf(f, "module: %s\nmodule_base: 0x%lx\noffset_in_module: 0x%lx\n",
-                mod, (unsigned long)base, (unsigned long)(pc - base));
+        fprintf(f, "signal: %d\nfault_addr: %p\n", sig, info->si_addr);
+        fprintf(f, "pc: 0x%lx  module: %s  offset: 0x%lx\n",
+                (unsigned long)pc, mod, (unsigned long)(pc - base));
+        fprintf(f, "lr(caller): 0x%lx  module: %s  offset: 0x%lx\n",
+                (unsigned long)lr, modLr, (unsigned long)(lr - baseLr));
+        fprintf(f, "r0: 0x%lx  r1: 0x%lx  r2: 0x%lx  r3: 0x%lx\n",
+                (unsigned long)r0, (unsigned long)r1, (unsigned long)r2, (unsigned long)r3);
         fclose(f);
     }
 
     int idx = (sig==SIGSEGV)?0:(sig==SIGABRT)?1:(sig==SIGBUS)?2:3;
     sigaction(sig, &g_old[idx], nullptr);
-    raise(sig); // lanjut ke default handler, game tetap FC seperti biasa
+    raise(sig);
 }
 
 static void install(int sig, int idx) {
@@ -75,7 +85,7 @@ static void install(int sig, int idx) {
 
 extern "C" {
 EXPORT void* __GetModInfo() {
-    static const char* info = "samplog|1.0|Native crash logger (module+offset)|brruham";
+    static const char* info = "samplog|1.1|Native crash logger (module+offset+lr+regs)|brruham";
     return (void*)info;
 }
 EXPORT void OnModPreLoad() { remove(LOGFILE); }
@@ -83,6 +93,6 @@ EXPORT void OnModLoad() {
     install(SIGSEGV, 0); install(SIGABRT, 1);
     install(SIGBUS, 2);  install(SIGILL, 3);
     FILE* f = fopen(LOGFILE, "a");
-    if (f) { fprintf(f, "[samplog] handler terpasang\n"); fclose(f); }
+    if (f) { fprintf(f, "[samplog] handler terpasang v1.1\n"); fclose(f); }
 }
 }
