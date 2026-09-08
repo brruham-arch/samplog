@@ -315,10 +315,13 @@ EXPORT bool samplog_swap_clump_safe(void* pedPtr, void* newClump) {
 
     typedef void (*ClumpInitFn)(void*);
     typedef void (*AddAnimFn)(void*, int, int);
+    typedef void* (*GetFirstAssocFnLocal)(void*);
     static ClumpInitFn RpAnimBlendClumpInit =
         (ClumpInitFn)dlsym(hGtasa, "_Z20RpAnimBlendClumpInitP7RpClump");
     static AddAnimFn CAnimManager_AddAnimation =
         (AddAnimFn)dlsym(hGtasa, "_ZN12CAnimManager12AddAnimationEP7RpClump12AssocGroupId11AnimationId");
+    static GetFirstAssocFnLocal RpAnimBlendClumpGetFirstAssociation_local =
+        (GetFirstAssocFnLocal)dlsym(hGtasa, "_Z35RpAnimBlendClumpGetFirstAssociationP7RpClump");
 
     if (log) fprintf(log, "clumpInit=%p addAnim=%p\n", (void*)RpAnimBlendClumpInit, (void*)CAnimManager_AddAnimation);
 
@@ -328,7 +331,10 @@ EXPORT bool samplog_swap_clump_safe(void* pedPtr, void* newClump) {
     }
     if (CAnimManager_AddAnimation) {
         CAnimManager_AddAnimation(newClump, 0, 3); // group 0, ANIM_STD_IDLE_STANCE (id umum=3)
-        void* checkAssoc = g_GetFirstAssoc ? g_GetFirstAssoc(newClump) : nullptr;
+        void* checkAssoc = GetAnimHierarchyFromClump ? nullptr : nullptr; // placeholder, cek manual di bawah
+        if (RpAnimBlendClumpGetFirstAssociation_local) {
+            checkAssoc = RpAnimBlendClumpGetFirstAssociation_local(newClump);
+        }
         if (log) fprintf(log, "AddAnimation dipanggil, firstAssoc setelah init=%p\n", checkAssoc);
     }
 
