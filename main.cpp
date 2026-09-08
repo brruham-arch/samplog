@@ -11,6 +11,7 @@
 #define LOGFILE "/storage/emulated/0/samplog_crash.txt"
 #define TESTLOG "/storage/emulated/0/samplog_test.txt"
 #define EXPORT __attribute__((visibility("default")))
+#define MOD_VERSION "v2.5"
 
 static struct sigaction g_old[4];
 
@@ -120,7 +121,7 @@ static unsigned char* readWholeFile(const char* path, long* outSize, FILE* log) 
 extern "C" {
 
 EXPORT void* __GetModInfo() {
-    static const char* info = "samplog|2.0|multi-variant clump loader|brruham";
+    static const char* info = "samplog|" MOD_VERSION "|multi-variant clump loader + anim init|brruham";
     return (void*)info;
 }
 
@@ -130,7 +131,7 @@ EXPORT void OnModLoad() {
     install(SIGSEGV, 0); install(SIGABRT, 1);
     install(SIGBUS, 2);  install(SIGILL, 3);
     FILE* f = fopen(LOGFILE, "a");
-    if (f) { fprintf(f, "[samplog] handler terpasang v2.0\n"); fclose(f); }
+    if (f) { fprintf(f, "[samplog] ===== MOD LOADED: %s =====\n", MOD_VERSION); fclose(f); }
 }
 
 EXPORT int samplog_test_fopen(const char* path) {
@@ -285,7 +286,7 @@ typedef void  (*UpdateMatricesFn)(void*);
 
 EXPORT bool samplog_swap_clump_safe(void* pedPtr, void* newClump) {
     FILE* log = fopen(TESTLOG, "a");
-    if (log) fprintf(log, "\n=== SWAP SAFE ===\n");
+    if (log) fprintf(log, "\n=== SWAP SAFE [%s] ===\n", MOD_VERSION);
 
     void* hGtasa = dlopen("libGTASA.so", RTLD_NOW);
     if (!hGtasa) { if (log) { fprintf(log, "dlopen gagal\n"); fclose(log); } return false; }
